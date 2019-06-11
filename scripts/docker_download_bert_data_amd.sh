@@ -1,0 +1,1 @@
+sh scripts/docker_run.sh bert_amd "sh scripts/download_bert_data.sh"
