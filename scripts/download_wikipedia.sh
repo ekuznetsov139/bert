@@ -1,13 +1,13 @@
-set -e
-mkdir -p bert_data
-cd bert_data
+DATA_DIR=./data/wikipedia
+mkdir -p $DATA_DIR
+cd $DATA_DIR
 
 # download wikipedia
 wget -c https://dumps.wikimedia.org/enwiki/latest/enwiki-latest-pages-articles.xml.bz2
 
 
 # extract wikipedia
-bzip2 -dkv enwiki-latest-pages-articles.xml.bz2 # > enwiki-latest-pages-articles.xml
+bzip2 -dkv enwiki-latest-pages-articles.xml.bz2
 git clone https://github.com/attardi/wikiextractor
-python wikiextractor/WikiExtractor.py -o wikipedia enwiki-latest-pages-articles.xml
+python3 wikiextractor/WikiExtractor.py -o wiki_text enwiki-latest-pages-articles.xml
 
