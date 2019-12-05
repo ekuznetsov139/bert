@@ -13,9 +13,8 @@ mkdir -p $DATA_DIR
 cp $MODEL_CONFIG_DIR/vocab.txt $TRAIN_DIR/vocab.txt
 cp $MODEL_CONFIG_DIR/bert_config.json $TRAIN_DIR/bert_config.json
 
-DATA_SOURCE_FILE_PATH=data/train_en.txt
-DATA_SOURCE_FILE=$(basename "$DATA_SOURCE_FILE_PATH")
-DATA_SOURCE_NAME="${DATA_SOURCE_FILE%.*}"
+DATA_SOURCE_FILE_PATH=data/wiki_00
+DATA_SOURCE_NAME=$(basename "$DATA_SOURCE_FILE_PATH")
 
 # iterate through configs (Batch, Sequence Length)
 for CONFIG in 4,512; do
