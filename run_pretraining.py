@@ -22,6 +22,7 @@ import os
 import modeling
 import optimization
 import tensorflow as tf
+from tensorflow.core.protobuf import rewriter_config_pb2
 
 flags = tf.compat.v1.flags
 
@@ -80,6 +81,8 @@ flags.DEFINE_integer("iterations_per_loop", 1000,
 flags.DEFINE_integer("max_eval_steps", 100, "Maximum number of eval steps.")
 
 flags.DEFINE_bool("use_tpu", False, "Whether to use TPU or GPU/CPU.")
+
+flags.DEFINE_bool("use_xla", False, "xla")
 
 flags.DEFINE_string(
     "tpu_name", None,
@@ -427,6 +430,11 @@ def main(_):
         FLAGS.tpu_name, zone=FLAGS.tpu_zone, project=FLAGS.gcp_project)
 
   is_per_host = tf.compat.v1.estimator.tpu.InputPipelineConfig.PER_HOST_V2
+  session_config =  tf.compat.v1.ConfigProto()
+  if FLAGS.use_xla:
+      session_config.graph_options.optimizer_options.global_jit_level = tf.compat.v1.OptimizerOptions.ON_1
+      session_config.graph_options.rewrite_options.memory_optimization = rewriter_config_pb2.RewriterConfig.NO_MEM_OPT
+
   run_config = tf.compat.v1.estimator.tpu.RunConfig(
       cluster=tpu_cluster_resolver,
       master=FLAGS.master,
@@ -435,7 +443,8 @@ def main(_):
       tpu_config=tf.compat.v1.estimator.tpu.TPUConfig(
           iterations_per_loop=FLAGS.iterations_per_loop,
           num_shards=FLAGS.num_tpu_cores,
-          per_host_input_for_training=is_per_host))
+          per_host_input_for_training=is_per_host),
+          session_config=session_config)
 
   model_fn = model_fn_builder(
       bert_config=bert_config,

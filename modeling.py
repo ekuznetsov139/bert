@@ -26,7 +26,7 @@ import re
 import numpy as np
 import six
 import tensorflow as tf
-
+import os
 
 class BertConfig(object):
   """Configuration for `BertModel`."""
@@ -272,8 +272,11 @@ def gelu(x):
   Returns:
     `x` with the GELU activation applied.
   """
+  if os.environ.get('TF_ROCM_GELU')=='1':
+    return tf.nn.gelu(x)
+
   cdf = 0.5 * (1.0 + tf.tanh(
-      (np.sqrt(2 / np.pi) * (x + 0.044715 * tf.pow(x, 3)))))
+    (np.sqrt(2 / np.pi) * (x + 0.044715 * tf.pow(x, 3)))))
   return x * cdf
 
 

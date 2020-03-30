@@ -4,7 +4,8 @@ CODE_DIR=.
 DATA_DIR=./data
 TRAIN_DIR=./bert_large_perf_train
 MODEL_CONFIG_DIR=configs/bert_large
-
+XLA=${XLA:-0}
+echo "XLA" $XLA
 rm -rf $TRAIN_DIR
 mkdir -p $TRAIN_DIR
 mkdir -p $DATA_DIR
@@ -48,14 +49,17 @@ for CONFIG in 4,512; do
     --input_file=$DATA_TFRECORD \
     --output_dir=$CUR_TRAIN_DIR \
     --do_train=True \
-    --do_eval=True \
+    --do_eval=False \
     --bert_config_file=$TRAIN_DIR/bert_config.json \
     --train_batch_size=$BATCH \
     --max_seq_length=$SEQ \
     --max_predictions_per_seq=20 \
-    --num_train_steps=1500 \
-    --num_warmup_steps=150 \
+    --num_train_steps=50 \
+    --num_warmup_steps=0 \
     --learning_rate=2e-5 \
+    --use_xla=$XLA \
     2>&1 | tee $CUR_TRAIN_DIR/${DATA_SOURCE_NAME}_ba${BATCH}_seq${SEQ}.txt
 
 done
+
+cat bert_large_perf_train/wiki_00_ba4_seq512/wiki_00_ba4_seq512.txt | grep "INFO:tensorflow:examples/sec" | cut -d" " -f2| awk '{ total += $1; count++ } END { print total/count }' | tee -a perf.txt

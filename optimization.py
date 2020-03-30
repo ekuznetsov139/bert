@@ -21,6 +21,7 @@ from __future__ import print_function
 import re
 import tensorflow as tf
 
+import os
 
 def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu):
   """Creates an optimizer training op."""
@@ -66,6 +67,9 @@ def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu):
 
   if use_tpu:
     optimizer = tf.compat.v1.tpu.CrossShardOptimizer(optimizer)
+
+  if os.environ.get('FP16')=='1':
+    optimizer=tf.train.experimental.enable_mixed_precision_graph_rewrite(optimizer)
 
   tvars = tf.compat.v1.trainable_variables()
   grads = tf.gradients(ys=loss, xs=tvars)
@@ -134,8 +138,10 @@ class AdamWeightDecayOptimizer(tf.compat.v1.train.Optimizer):
           tf.multiply(self.beta_2, v) + tf.multiply(1.0 - self.beta_2,
                                                     tf.square(grad)))
 
-      update = next_m / (tf.sqrt(next_v) + self.epsilon)
-
+      if os.environ.get('TF_ROCM_GELU')=='1':
+        update = next_m * tf.math.rsqrt_eps(next_v, self.epsilon) # / (tf.sqrt(next_v) + self.epsilon)
+      else:
+        update = next_m / (tf.sqrt(next_v) + self.epsilon)
       # Just adding the square of the weights to the loss function is *not*
       # the correct way of using L2 regularization/weight decay with Adam,
       # since that will interact with the m and v parameters in strange ways.
