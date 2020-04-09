@@ -62,4 +62,4 @@ for CONFIG in 4,512; do
 
 done
 
-cat bert_large_perf_train/wiki_00_ba4_seq512/wiki_00_ba4_seq512.txt | grep "INFO:tensorflow:examples/sec" | cut -d" " -f2| awk '{ total += $1; count++ } END { print total/count }' | tee -a perf.txt
+cat bert_large_perf_train/wiki_00_ba4_seq512/wiki_00_ba4_seq512.txt | grep "INFO:tensorflow:examples/sec" | tail -n +2 - | cut -d" " -f2| awk '{ total += 1/$1; count++ } END { print 4*total*(count+1)/count }' | tee -a perf.txt
