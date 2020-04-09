@@ -57,6 +57,7 @@ def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu):
   # It is recommended that you use this optimizer for fine tuning, since this
   # is how the model was trained (note that the Adam m/v variables are NOT
   # loaded from init_checkpoint.)
+  #optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
   optimizer = AdamWeightDecayOptimizer(
       learning_rate=learning_rate,
       weight_decay_rate=0.01,
@@ -87,6 +88,64 @@ def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu):
   train_op = tf.group(train_op, [global_step.assign(new_global_step)])
   return train_op
 
+#@tf.function(experimental_compile=True,experimental_relax_shapes=True)
+def calc_gradient_fn(beta_1, beta_2, learning_rate, epsilon, grad, m, v, param):
+      print("### calc_gradient_fn", grad, m, v, param)
+      # Standard Adam update.
+      next_m = (
+          tf.multiply(beta_1, m) + tf.multiply(1.0 - beta_1, grad))
+      next_v = (
+          tf.multiply(beta_2, v) + tf.multiply(1.0 - beta_2,
+                                                tf.square(grad)))
+
+      # if os.environ.get('TF_ROCM_GELU')=='1':
+      #    update = next_m * tf.math.rsqrt_eps(next_v, self.epsilon) # / (tf.sqrt(next_v) + self.epsilon)
+      #else:
+      update = next_m / (tf.sqrt(next_v) + epsilon)
+      # Just adding the square of the weights to the loss function is *not*
+      # the correct way of using L2 regularization/weight decay with Adam,
+      # since that will interact with the m and v parameters in strange ways.
+      #
+      # Instead we want ot decay the weights in a manner that doesn't interact
+      # with the m/v parameters. This is equivalent to adding the square
+      # of the weights to the loss with plain (non-momentum) SGD.
+      #if self._do_use_weight_decay(param_name):
+      #   update += self.weight_decay_rate * param
+
+      update_with_lr = learning_rate * update
+
+      next_param = param - update_with_lr
+      return next_param, next_m, next_v
+
+#@tf.function(experimental_compile=True,experimental_relax_shapes=True)
+def calc_gradient_fn_with_decay(beta_1, beta_2, learning_rate, epsilon, weight_decay_rate, grad, m, v, param):
+      #print("### calc_gradient_fn_with_decay")
+      # Standard Adam update.
+      next_m = (
+          tf.multiply(beta_1, m) + tf.multiply(1.0 - beta_1, grad))
+      next_v = (
+          tf.multiply(beta_2, v) + tf.multiply(1.0 - beta_2,
+                                                    tf.square(grad)))
+
+      #if os.environ.get('TF_ROCM_GELU')=='1':
+      #    update = next_m * tf.math.rsqrt_eps(next_v, self.epsilon) # / (tf.sqrt(next_v) + self.epsilon)
+      #else:
+      update = next_m / (tf.sqrt(next_v) + epsilon)
+      # Just adding the square of the weights to the loss function is *not*
+      # the correct way of using L2 regularization/weight decay with Adam,
+      # since that will interact with the m and v parameters in strange ways.
+      #
+      # Instead we want ot decay the weights in a manner that doesn't interact
+      # with the m/v parameters. This is equivalent to adding the square
+      # of the weights to the loss with plain (non-momentum) SGD.
+      #if self._do_use_weight_decay(param_name):
+      update += weight_decay_rate * param
+
+      update_with_lr = learning_rate * update
+
+      next_param = param - update_with_lr
+      return next_param, next_m, next_v
+
 
 class AdamWeightDecayOptimizer(tf.compat.v1.train.Optimizer):
   """A basic Adam optimizer that includes "correct" L2 weight decay."""
@@ -101,13 +160,16 @@ class AdamWeightDecayOptimizer(tf.compat.v1.train.Optimizer):
                name="AdamWeightDecayOptimizer"):
     """Constructs a AdamWeightDecayOptimizer."""
     super(AdamWeightDecayOptimizer, self).__init__(False, name)
+    #super(AdamWeightDecayOptimizer, self).__init__(learning_rate, beta_1, beta_2, epsilon, False, name)
 
     self.learning_rate = learning_rate
-    self.weight_decay_rate = weight_decay_rate
-    self.beta_1 = beta_1
-    self.beta_2 = beta_2
-    self.epsilon = epsilon
+    self.weight_decay_on = (weight_decay_rate!=0.0)
+    self.weight_decay_rate = tf.constant(weight_decay_rate)
+    self.beta_1 = tf.constant(beta_1)
+    self.beta_2 = tf.constant(beta_2)
+    self.epsilon = tf.constant(epsilon)
     self.exclude_from_weight_decay = exclude_from_weight_decay
+
 
   def apply_gradients(self, grads_and_vars, global_step=None, name=None):
     """See base class."""
@@ -131,30 +193,10 @@ class AdamWeightDecayOptimizer(tf.compat.v1.train.Optimizer):
           trainable=False,
           initializer=tf.compat.v1.zeros_initializer())
 
-      # Standard Adam update.
-      next_m = (
-          tf.multiply(self.beta_1, m) + tf.multiply(1.0 - self.beta_1, grad))
-      next_v = (
-          tf.multiply(self.beta_2, v) + tf.multiply(1.0 - self.beta_2,
-                                                    tf.square(grad)))
-
-      if os.environ.get('TF_ROCM_GELU')=='1':
-        update = next_m * tf.math.rsqrt_eps(next_v, self.epsilon) # / (tf.sqrt(next_v) + self.epsilon)
-      else:
-        update = next_m / (tf.sqrt(next_v) + self.epsilon)
-      # Just adding the square of the weights to the loss function is *not*
-      # the correct way of using L2 regularization/weight decay with Adam,
-      # since that will interact with the m and v parameters in strange ways.
-      #
-      # Instead we want ot decay the weights in a manner that doesn't interact
-      # with the m/v parameters. This is equivalent to adding the square
-      # of the weights to the loss with plain (non-momentum) SGD.
       if self._do_use_weight_decay(param_name):
-        update += self.weight_decay_rate * param
-
-      update_with_lr = self.learning_rate * update
-
-      next_param = param - update_with_lr
+        next_param, next_m, next_v = calc_gradient_fn_with_decay(self.beta_1, self.beta_2, self.learning_rate, self.epsilon, self.weight_decay_rate, grad, m, v, param)
+      else:
+        next_param, next_m, next_v = calc_gradient_fn(self.beta_1, self.beta_2, self.learning_rate, self.epsilon, grad, m, v, param)
 
       assignments.extend(
           [param.assign(next_param),
@@ -164,7 +206,7 @@ class AdamWeightDecayOptimizer(tf.compat.v1.train.Optimizer):
 
   def _do_use_weight_decay(self, param_name):
     """Whether to use L2 weight decay for `param_name`."""
-    if not self.weight_decay_rate:
+    if not self.weight_decay_on:
       return False
     if self.exclude_from_weight_decay:
       for r in self.exclude_from_weight_decay:

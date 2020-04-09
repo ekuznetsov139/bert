@@ -260,7 +260,7 @@ class BertModel(object):
   def get_embedding_table(self):
     return self.embedding_table
 
-
+@tf.function(experimental_compile=True,experimental_relax_shapes=True)
 def gelu(x):
   """Gaussian Error Linear Unit.
 
@@ -272,11 +272,19 @@ def gelu(x):
   Returns:
     `x` with the GELU activation applied.
   """
-  if os.environ.get('TF_ROCM_GELU')=='1':
-    return tf.nn.gelu(x)
-
+#  if os.environ.get('TF_ROCM_GELU')=='1':
+#    return tf.nn.gelu(x)
+  print("### gelu")
+  #half = tf.constant(0.5, dtype=tf.float32)
+  #one = tf.constant(1.0, dtype=tf.float32)
+  #half = 0.5
+  #one = 1.0
+  #sqrt_half = tf.constant(np.sqrt(2/np.pi), dtype=tf.float32)
+  #fortyfour = tf.constant(0.044715, dtype=tf.float32)
   cdf = 0.5 * (1.0 + tf.tanh(
-    (np.sqrt(2 / np.pi) * (x + 0.044715 * tf.pow(x, 3)))))
+      (np.sqrt(2 / np.pi) * (x + 0.044715 * tf.pow(x, 3)))))
+  #cdf = half * (one + tf.tanh(
+  #      (sqrt_half * (x + fortyfour * x*x*x))))
   return x * cdf
 
 
