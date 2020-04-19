@@ -369,10 +369,25 @@ def dropout(input_tensor, dropout_prob):
   output = tf.nn.dropout(input_tensor, 1 - (1.0 - dropout_prob))
   return output
 
-
 def layer_norm(input_tensor, name=None):
   """Run layer normalization on the last dimension of the tensor."""
-  return tf.keras.layers.LayerNormalization(axis=-1, epsilon=1e-12)(inputs=input_tensor)
+  param_shape = input_tensor.shape[-1:]
+  scale = tf.compat.v1.get_variable(name="scale", shape=param_shape,
+         initializer=tf.ones_initializer())
+  offset = tf.compat.v1.get_variable(name="offset", shape=param_shape,
+         initializer=tf.zeros_initializer())
+  @tf.function(experimental_compile=True,experimental_relax_shapes=True)
+  def batch_norm(t, s, o):
+    mean, variance = tf.nn.moments(t, axes=[-1], keepdims=True)
+    return tf.nn.batch_normalization(
+          t,
+          mean,
+          variance,
+          offset=o,
+          scale=s,
+          variance_epsilon=1e-12)
+  return batch_norm(input_tensor, scale, offset)
+  #return tf.keras.layers.LayerNormalization(axis=-1, epsilon=1e-12)(inputs=input_tensor)
 
 
 def layer_norm_and_dropout(input_tensor, dropout_prob, name=None):

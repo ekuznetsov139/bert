@@ -88,7 +88,7 @@ def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu):
   train_op = tf.group(train_op, [global_step.assign(new_global_step)])
   return train_op
 
-#@tf.function(experimental_compile=True,experimental_relax_shapes=True)
+@tf.function(experimental_compile=True,experimental_relax_shapes=True)
 def calc_gradient_fn(beta_1, beta_2, learning_rate, epsilon, grad, m, v, param):
       print("### calc_gradient_fn", grad, m, v, param)
       # Standard Adam update.
@@ -117,8 +117,8 @@ def calc_gradient_fn(beta_1, beta_2, learning_rate, epsilon, grad, m, v, param):
       next_param = param - update_with_lr
       return next_param, next_m, next_v
 
-#@tf.function(experimental_compile=True,experimental_relax_shapes=True)
-def calc_gradient_fn_with_decay(beta_1, beta_2, learning_rate, epsilon, weight_decay_rate, grad, m, v, param):
+@tf.function(experimental_compile=True,experimental_relax_shapes=True)
+def calc_gradient_fn_with_decay(beta_1, beta_2, learning_rate, epsilon, do_decay, weight_decay_rate, grad, m, v, param):
       #print("### calc_gradient_fn_with_decay")
       # Standard Adam update.
       next_m = (
@@ -139,7 +139,8 @@ def calc_gradient_fn_with_decay(beta_1, beta_2, learning_rate, epsilon, weight_d
       # with the m/v parameters. This is equivalent to adding the square
       # of the weights to the loss with plain (non-momentum) SGD.
       #if self._do_use_weight_decay(param_name):
-      update += weight_decay_rate * param
+      if do_decay:
+        update += weight_decay_rate * param
 
       update_with_lr = learning_rate * update
 
@@ -193,10 +194,12 @@ class AdamWeightDecayOptimizer(tf.compat.v1.train.Optimizer):
           trainable=False,
           initializer=tf.compat.v1.zeros_initializer())
 
-      if self._do_use_weight_decay(param_name):
-        next_param, next_m, next_v = calc_gradient_fn_with_decay(self.beta_1, self.beta_2, self.learning_rate, self.epsilon, self.weight_decay_rate, grad, m, v, param)
-      else:
-        next_param, next_m, next_v = calc_gradient_fn(self.beta_1, self.beta_2, self.learning_rate, self.epsilon, grad, m, v, param)
+#      if self._do_use_weight_decay(param_name):
+#        next_param, next_m, next_v = calc_gradient_fn_with_decay(self.beta_1, self.beta_2, self.learning_rate, self.epsilon, self.weight_decay_rate, grad, m, v, param)
+#      else:
+#        next_param, next_m, next_v = calc_gradient_fn(self.beta_1, self.beta_2, self.learning_rate, self.epsilon, grad, m, v, param)
+      next_param, next_m, next_v = calc_gradient_fn_with_decay(self.beta_1, self.beta_2, self.learning_rate, self.epsilon, 
+            self._do_use_weight_decay(param_name), self.weight_decay_rate, grad, m, v, param)
 
       assignments.extend(
           [param.assign(next_param),
