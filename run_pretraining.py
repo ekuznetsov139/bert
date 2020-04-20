@@ -113,6 +113,90 @@ flags.DEFINE_integer(
     
 flags.DEFINE_bool("use_horovod", False, "Whether to use Horovod.")
 
+flags.DEFINE_bool("use_fp16", False, "Whether to use FP16 via AMP.")
+
+flags.DEFINE_bool("manual_fp16", False, "Whether to use NVIDIA manual FP16.")
+
+# (copied from NVBERT)
+# report samples/sec, total loss and learning rate during training
+class _LogSessionRunHook(tf.estimator.SessionRunHook):
+  def __init__(self, global_batch_size, num_accumulation_steps, display_every=50, hvd_rank=-1):
+    self.global_batch_size = global_batch_size
+    self.display_every = display_every
+    self.hvd_rank = hvd_rank
+    self.num_accumulation_steps = num_accumulation_steps
+  def after_create_session(self, session, coord):
+    self.elapsed_secs = 0.
+    self.count = 0
+    self.all_count = 0
+    self.avg_loss = 0.0
+
+  def before_run(self, run_context):
+    self.t0 = time.time()
+    if self.num_accumulation_steps <= 1:
+        if FLAGS.manual_fp16 or FLAGS.use_fp16:
+            return tf.estimator.SessionRunArgs(
+                fetches=['step_update:0', 'total_loss:0',
+                         'learning_rate:0', 'nsp_loss:0',
+                         'mlm_loss:0', 'loss_scale:0'])
+        else:
+            return tf.estimator.SessionRunArgs(
+                fetches=['step_update:0', 'total_loss:0',
+                         'learning_rate:0', 'nsp_loss:0',
+                         'mlm_loss:0'])
+    else:
+        if FLAGS.manual_fp16 or FLAGS.use_fp16:
+          return tf.estimator.SessionRunArgs(
+              fetches=['step_update:0', 'update_step:0', 'total_loss:0',
+                       'learning_rate:0', 'nsp_loss:0',
+                       'mlm_loss:0', 'loss_scale:0'])
+        else:
+          return tf.estimator.SessionRunArgs(
+              fetches=['step_update:0', 'update_step:0', 'total_loss:0',
+                       'learning_rate:0', 'nsp_loss:0',
+                       'mlm_loss:0'])
+  def after_run(self, run_context, run_values):
+    self.elapsed_secs += time.time() - self.t0
+    if self.num_accumulation_steps <=1:
+        if FLAGS.manual_fp16 or FLAGS.use_fp16:
+            global_step, total_loss, lr, nsp_loss, mlm_loss, loss_scaler = run_values.results
+        else:
+            global_step, total_loss, lr, nsp_loss, mlm_loss = run_values. \
+                results
+        update_step = True
+    else:
+        if FLAGS.manual_fp16 or FLAGS.use_fp16:
+          global_step, update_step, total_loss, lr, nsp_loss, mlm_loss, loss_scaler = run_values.results
+        else:
+          global_step, update_step, total_loss, lr, nsp_loss, mlm_loss = run_values.\
+              results
+    print_step = global_step + 1 # One-based index for printing.
+    self.avg_loss += total_loss
+    self.all_count += 1
+    if update_step:
+        self.count += 1
+        if (print_step == 1 or print_step % self.display_every == 0):
+            dt = self.elapsed_secs / self.count
+            sent_per_sec = self.global_batch_size / dt
+            avg_loss_step = self.avg_loss / self.all_count
+            if self.hvd_rank >= 0:
+              if FLAGS.manual_fp16 or FLAGS.use_fp16:
+                print('Rank = %2d :: Step = %6i Throughput = %11.1f MLM Loss = %10.4e NSP Loss = %10.4e Loss = %6.3f Average Loss = %6.3f LR = %6.4e Loss scale = %6.4e' %
+                      (self.hvd_rank, print_step, sent_per_sec, mlm_loss, nsp_loss, total_loss, avg_loss_step, lr, loss_scaler))
+            else:
+              if FLAGS.manual_fp16 or FLAGS.use_fp16:
+                print('Step = %6i Throughput = %11.1f MLM Loss = %10.4e NSP Loss = %10.4e Loss = %6.3f Average Loss = %6.3f LR = %6.4e Loss scale = %6.4e' %
+                      (print_step, sent_per_sec, mlm_loss, nsp_loss, total_loss, avg_loss_step, lr, loss_scaler))
+              else:
+                print('Step = %6i Throughput = %11.1f MLM Loss = %10.4e NSP Loss = %10.4e Loss = %6.3f Average Loss = %6.3f LR = %6.4e' %
+                      (print_step, sent_per_sec, mlm_loss, nsp_loss, total_loss, avg_loss_step, lr))
+            self.elapsed_secs = 0.
+            self.count = 0
+            self.avg_loss = 0.0
+            self.all_count = 0
+            sys.stdout.flush()
+
+
 
 def model_fn_builder(bert_config, init_checkpoint, learning_rate,
                      num_train_steps, num_warmup_steps, use_tpu,
@@ -413,7 +497,7 @@ def _decode_record(record, name_to_features):
 
 def main(_):
   tf.logging.set_verbosity(tf.logging.INFO)
-  
+
   use_hvd = False
   if FLAGS.use_horovod and hvd != None:
     use_hvd = True
@@ -496,10 +580,14 @@ def main(_):
         max_predictions_per_seq=FLAGS.max_predictions_per_seq,
         is_training=True)
 
-    hooks = None
+    hooks = []
+    if FLAGS.report_loss and (not FLAGS.horovod or hvd.rank() == 0):
+      #global_batch_size = FLAGS.train_batch_size * FLAGS.num_accumulation_steps if not FLAGS.horovod else FLAGS.train_batch_size * FLAGS.num_accumulation_steps * hvd.size()
+      global_batch_size = FLAGS.train_batch_size if not FLAGS.horovod else FLAGS.train_batch_size * hvd.size()
+      hooks.append(_LogSessionRunHook(global_batch_size, FLAGS.num_accumulation_steps, FLAGS.display_loss_steps))
     if use_hvd:
       # [HVD] Ensure all GPU's start with the same weights.
-      hooks = [hvd.BroadcastGlobalVariablesHook(0)]
+      hooks.append(hvd.BroadcastGlobalVariablesHook(0))
     estimator.train(input_fn=train_input_fn, max_steps=FLAGS.num_train_steps, hooks=hooks)
 
   if FLAGS.do_eval:
