@@ -21,7 +21,9 @@ from __future__ import print_function
 import os
 import modeling
 import optimization
+import sys
 import tensorflow as tf
+import time
 
 # Add Horovod to run_pretraining
 try:
@@ -142,8 +144,9 @@ class _LogSessionRunHook(tf.estimator.SessionRunHook):
         else:
             return tf.estimator.SessionRunArgs(
                 fetches=['step_update:0', 'total_loss:0',
-                         'learning_rate:0', 'nsp_loss:0',
-                         'mlm_loss:0'])
+                         'learning_rate:0'
+                         #, 'nsp_loss:0','mlm_loss:0'
+                         ])
     else:
         if FLAGS.manual_fp16 or FLAGS.use_fp16:
           return tf.estimator.SessionRunArgs(
@@ -161,15 +164,16 @@ class _LogSessionRunHook(tf.estimator.SessionRunHook):
         if FLAGS.manual_fp16 or FLAGS.use_fp16:
             global_step, total_loss, lr, nsp_loss, mlm_loss, loss_scaler = run_values.results
         else:
-            global_step, total_loss, lr, nsp_loss, mlm_loss = run_values. \
-                results
+            #global_step, total_loss, lr, nsp_loss, mlm_loss = run_values.results
+            global_step, total_loss, lr = run_values.results
+            nsp_loss = 0.0
+            mlm_loss = 0.0
         update_step = True
     else:
         if FLAGS.manual_fp16 or FLAGS.use_fp16:
           global_step, update_step, total_loss, lr, nsp_loss, mlm_loss, loss_scaler = run_values.results
         else:
-          global_step, update_step, total_loss, lr, nsp_loss, mlm_loss = run_values.\
-              results
+          global_step, update_step, total_loss, lr, nsp_loss, mlm_loss = run_values.results
     print_step = global_step + 1 # One-based index for printing.
     self.avg_loss += total_loss
     self.all_count += 1
@@ -185,11 +189,15 @@ class _LogSessionRunHook(tf.estimator.SessionRunHook):
                       (self.hvd_rank, print_step, sent_per_sec, mlm_loss, nsp_loss, total_loss, avg_loss_step, lr, loss_scaler))
             else:
               if FLAGS.manual_fp16 or FLAGS.use_fp16:
-                print('Step = %6i Throughput = %11.1f MLM Loss = %10.4e NSP Loss = %10.4e Loss = %6.3f Average Loss = %6.3f LR = %6.4e Loss scale = %6.4e' %
-                      (print_step, sent_per_sec, mlm_loss, nsp_loss, total_loss, avg_loss_step, lr, loss_scaler))
+                #print('Step = %6i Throughput = %11.3f MLM Loss = %10.4e NSP Loss = %10.4e Loss = %6.3f Average Loss = %6.3f LR = %6.4e Loss scale = %6.4e' %
+                #      (print_step, sent_per_sec, mlm_loss, nsp_loss, total_loss, avg_loss_step, lr, loss_scaler))
+                print('Step = %6i Throughput = %11.3f Loss = %6.3f Average Loss = %6.3f LR = %6.4e Loss scale = %6.4e' %
+                      (print_step, sent_per_sec, total_loss, avg_loss_step, lr, loss_scaler))
               else:
-                print('Step = %6i Throughput = %11.1f MLM Loss = %10.4e NSP Loss = %10.4e Loss = %6.3f Average Loss = %6.3f LR = %6.4e' %
-                      (print_step, sent_per_sec, mlm_loss, nsp_loss, total_loss, avg_loss_step, lr))
+                #print('Step = %6i Throughput = %11.3f MLM Loss = %10.4e NSP Loss = %10.4e Loss = %6.3f Average Loss = %6.3f LR = %6.4e' %
+                #      (print_step, sent_per_sec, mlm_loss, nsp_loss, total_loss, avg_loss_step, lr))
+                print('Step = %6i Throughput = %11.3f Loss = %6.3f Average Loss = %6.3f LR = %6.4e' %
+                      (print_step, sent_per_sec, total_loss, avg_loss_step, lr))
             self.elapsed_secs = 0.
             self.count = 0
             self.avg_loss = 0.0
@@ -237,8 +245,11 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
      next_sentence_log_probs) = get_next_sentence_output(
          bert_config, model.get_pooled_output(), next_sentence_labels)
 
-    total_loss = masked_lm_loss + next_sentence_loss
+    masked_lm_loss = tf.identity(masked_lm_loss, name="mlm_loss")
+    next_sentence_loss = tf.identity(next_sentence_loss, name="nsp_loss")
 
+    total_loss = masked_lm_loss + next_sentence_loss
+    total_loss = tf.identity(total_loss, name='total_loss')
     tvars = tf.trainable_variables()
 
     initialized_variable_names = {}
@@ -549,7 +560,7 @@ def main(_):
           iterations_per_loop=FLAGS.iterations_per_loop,
           num_shards=FLAGS.num_tpu_cores,
           per_host_input_for_training=is_per_host),
-      log_step_count_steps=25,
+      log_step_count_steps=1000000,
       session_config=config)
 
   model_fn = model_fn_builder(
@@ -581,10 +592,10 @@ def main(_):
         is_training=True)
 
     hooks = []
-    if FLAGS.report_loss and (not FLAGS.horovod or hvd.rank() == 0):
+    if (not use_hvd or hvd.rank() == 0):
       #global_batch_size = FLAGS.train_batch_size * FLAGS.num_accumulation_steps if not FLAGS.horovod else FLAGS.train_batch_size * FLAGS.num_accumulation_steps * hvd.size()
-      global_batch_size = FLAGS.train_batch_size if not FLAGS.horovod else FLAGS.train_batch_size * hvd.size()
-      hooks.append(_LogSessionRunHook(global_batch_size, FLAGS.num_accumulation_steps, FLAGS.display_loss_steps))
+      global_batch_size = FLAGS.train_batch_size if not use_hvd else FLAGS.train_batch_size * hvd.size()
+      hooks.append(_LogSessionRunHook(global_batch_size, 1, 20))
     if use_hvd:
       # [HVD] Ensure all GPU's start with the same weights.
       hooks.append(hvd.BroadcastGlobalVariablesHook(0))
