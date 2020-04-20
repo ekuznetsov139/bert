@@ -23,7 +23,12 @@ import tensorflow as tf
 
 import os
 
-def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu):
+try:
+  import horovod.tensorflow as hvd
+except:
+  hvd = None
+
+def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu, use_hvd):
   """Creates an optimizer training op."""
   global_step = tf.compat.v1.train.get_or_create_global_step()
 
@@ -69,11 +74,25 @@ def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu):
   if use_tpu:
     optimizer = tf.compat.v1.tpu.CrossShardOptimizer(optimizer)
 
+  if use_hvd:
+    # [HVD] Wrap the original optimizer by Horovod's distributed optimizer, which handles all the under the hood allreduce calls..
+    # Notice Horovod only does synchronized parameter update.
+    optimizer = hvd.DistributedOptimizer(optimizer)
+
   if os.environ.get('FP16')=='1':
     optimizer=tf.train.experimental.enable_mixed_precision_graph_rewrite(optimizer)
-
+ 
   tvars = tf.compat.v1.trainable_variables()
-  grads = tf.gradients(ys=loss, xs=tvars)
+  if use_hvd:
+    # [HVD] Use distributed optimizer to compute gradients
+    grads_and_vars=optimizer.compute_gradients(loss, tvars)
+    grads = [grad for grad,var in grads_and_vars]
+    tvars = [var for grad,var in grads_and_vars]
+  else:
+    # Use standard TF gradients
+    grads = tf.gradients(loss, tvars)
+
+#  grads = tf.gradients(ys=loss, xs=tvars)
 
   # This is how the model was pre-trained.
   (grads, _) = tf.clip_by_global_norm(grads, clip_norm=1.0)
@@ -85,6 +104,7 @@ def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu):
   # However, `AdamWeightDecayOptimizer` doesn't do this. But if you use
   # a different optimizer, you should probably take this line out.
   new_global_step = global_step + 1
+  new_global_step = tf.identity(new_global_step, name='step_update')
   train_op = tf.group(train_op, [global_step.assign(new_global_step)])
   return train_op
 
@@ -162,8 +182,7 @@ class AdamWeightDecayOptimizer(tf.compat.v1.train.Optimizer):
     """Constructs a AdamWeightDecayOptimizer."""
     super(AdamWeightDecayOptimizer, self).__init__(False, name)
     #super(AdamWeightDecayOptimizer, self).__init__(learning_rate, beta_1, beta_2, epsilon, False, name)
-
-    self.learning_rate = learning_rate
+    self.learning_rate = tf.identity(learning_rate, name='learning_rate')
     self.weight_decay_on = (weight_decay_rate!=0.0)
     self.weight_decay_rate = tf.constant(weight_decay_rate)
     self.beta_1 = tf.constant(beta_1)
