@@ -7,7 +7,6 @@ This BERT repository is a fork from the original [BERT repository by Google](htt
 * Added a one file test script to verify that the code works in AMD ROCm;
 * Added code to enable Horovod scaling in pre-training, and corresponding script to run
 the pre-training on a cluster.
-* Added an optional LAMB optimizer.
 
 ### A. One file test script
 
@@ -47,13 +46,6 @@ scripts/run_model_in_rocm_hvd_docker.sh
 The same parameters may be modified in this script as in the previous script file.
 In additional, this parameter can be adjusted:
 * The number of GPUs used.
-
-### C. LAMB Optimizer
-
-LAMB “Layer-wise Adaptive Moments optimizer for Batch training” is implemented as 
-an optional feature. To use the LAMB optimizer, please run `pre_training.py` with
-the `--optimizer_type` commandline option set to `lamb`. 
-If left unset or set to `adam`, the pre-training uses the ADAM optimizer by default.
 
 ## Below is the original Google README
 
