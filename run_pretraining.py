@@ -25,6 +25,25 @@ import sys
 import tensorflow as tf
 import time
 
+
+import multiprocessing.spawn
+_old_preparation_data = multiprocessing.spawn.get_preparation_data
+
+def _patched_preparation_data(name):
+    try:
+        return _old_preparation_data(name)
+    except AttributeError:
+        main_module = sys.modules['__main__']
+        # Any string for __spec__ does the job
+        main_module.__spec__ = ''
+        return _old_preparation_data(name)
+multiprocessing.spawn.get_preparation_data = _patched_preparation_data
+
+
+#main_module = sys.modules['__main__']
+#main_module.__spec__ = ''
+tf.logging.set_verbosity(tf.logging.INFO)
+
 # Add Horovod to run_pretraining
 try:
   import horovod.tensorflow as hvd
@@ -53,6 +72,9 @@ flags.DEFINE_string(
 flags.DEFINE_string(
     "init_checkpoint", None,
     "Initial checkpoint (usually from a pre-trained BERT model).")
+
+flags.DEFINE_string(
+    "eval_filename", None, "Eval output filename")
 
 flags.DEFINE_integer(
     "max_seq_length", 128,
@@ -443,7 +465,7 @@ def input_fn_builder(input_files,
         "segment_ids":
             tf.FixedLenFeature([max_seq_length], tf.int64),
         "masked_lm_positions":
-            tf.FixedLenFeature([max_predictions_per_seq], tf.int64),
+        tf.FixedLenFeature([max_predictions_per_seq], tf.int64),
         "masked_lm_ids":
             tf.FixedLenFeature([max_predictions_per_seq], tf.int64),
         "masked_lm_weights":
@@ -474,7 +496,7 @@ def input_fn_builder(input_files,
       d = tf.data.TFRecordDataset(input_files)
       # Since we evaluate for a fixed number of steps we don't want to encounter
       # out-of-range exceptions.
-      d = d.repeat()
+      #d = d.repeat()
 
     # We must `drop_remainder` on training because the TPU requires fixed
     # size dimensions. For eval, we assume we are evaluating on the CPU or GPU
@@ -507,7 +529,6 @@ def _decode_record(record, name_to_features):
 
 
 def main(_):
-  tf.logging.set_verbosity(tf.logging.INFO)
 
   use_hvd = False
   if FLAGS.use_horovod and hvd != None:
@@ -612,9 +633,9 @@ def main(_):
         is_training=False)
 
     result = estimator.evaluate(
-        input_fn=eval_input_fn, steps=FLAGS.max_eval_steps)
+        input_fn=eval_input_fn, steps=FLAGS.max_eval_steps if FLAGS.max_eval_steps>0 else None)
 
-    output_eval_file = os.path.join(FLAGS.output_dir, "eval_results.txt")
+    output_eval_file = os.path.join(FLAGS.output_dir, FLAGS.eval_filename or "eval_results.txt")
     with tf.gfile.GFile(output_eval_file, "w") as writer:
       tf.logging.info("***** Eval results *****")
       for key in sorted(result.keys()):
