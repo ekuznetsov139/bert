@@ -1,7 +1,7 @@
 SCRIPTPATH=$(dirname $(realpath $0))
 # export HIP_VISIBLE_DEVICES=0 # choose gpu
 
-CODE_DIR=/root/bert
+CODE_DIR=.
 DATA_DIR=/data/wikipedia
 TRAIN_DIR=./bert_full_train
 MODEL_CONFIG_DIR=configs/bert_large
@@ -9,9 +9,8 @@ MODEL_CONFIG_DIR=configs/bert_large
 export OMPI_ALLOW_RUN_AS_ROOT=1
 export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
-
-export TF_NUM_INTRAOP_THREADS=4
 export TF_NUM_INTEROP_THREADS=4
+export TF_NUM_INTRAOP_THREADS=4
 
 #rm -rf $TRAIN_DIR
 mkdir -p $TRAIN_DIR
@@ -39,21 +38,18 @@ for CONFIG in 10,128; do
   fi
 
   # run pretraining
-  horovodrun --verbose -np 8 -H localhost:8 python3 $CODE_DIR/run_pretraining.py \
+  python3 $CODE_DIR/run_pretraining.py \
     --input_file=$WIKI_TFRECORD_DIR/*.tfrecord \
     --output_dir=$CUR_TRAIN_DIR \
     --do_train=True \
-    --do_eval=False \
+    --do_eval=True \
     --bert_config_file=$TRAIN_DIR/bert_config.json \
     --train_batch_size=$BATCH \
     --max_seq_length=$SEQ \
     --max_predictions_per_seq=20 \
-    --num_train_steps=1000000 \
-    --num_warmup_steps=100000 \
-    --learning_rate=1e-4 \
-    --use_horovod=True \
-    |& tee -a train128.txt
+    --num_train_steps=100000 \
+    --num_warmup_steps=10000 \
+    --learning_rate=2e-5 \
+    --use_horovod=False
 
-  parallel -j 8 < scripts/eval_commands
-  python3 scripts/parse_eval.py
 done
