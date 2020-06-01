@@ -22,14 +22,20 @@ import os
 import sys
 import modeling
 import optimization
-import tensorflow as tf
 import time
+import tensorflow as tf
 
 from tensorflow.core.protobuf import rewriter_config_pb2
 
-flags = tf.compat.v1.flags
+tf.compat.v1.disable_resource_variables()
 
-FLAGS = flags.FLAGS
+# Add Horovod to run_pretraining
+try:
+  import horovod.tensorflow as hvd
+except:
+  hvd = None
+
+flags = tf.compat.v1.flags
 
 
 import multiprocessing.spawn
@@ -44,17 +50,6 @@ def _patched_preparation_data(name):
         main_module.__spec__ = ''
         return _old_preparation_data(name)
 multiprocessing.spawn.get_preparation_data = _patched_preparation_data
-
-#main_module = sys.modules['__main__']
-#main_module.__spec__ = ''
-#tf.logging.set_verbosity(tf.logging.INFO)
-
-# Add Horovod to run_pretraining
-try:
-  import horovod.tensorflow as hvd
-except:
-  hvd = None
-use_hvd=False
 
 ## Required parameters
 flags.DEFINE_string(
@@ -115,9 +110,7 @@ flags.DEFINE_integer("display_loss_steps", 20, "Display loss steps.")
 
 flags.DEFINE_bool("use_tpu", False, "Whether to use TPU or GPU/CPU.")
 
-flags.DEFINE_bool("use_xla", False, "xla")
-
-flags.DEFINE_bool("use_horovod", False, "Whether to use Horovod.")
+flags.DEFINE_integer("use_xla", 0, "XLA optimizations: 0 - off, 1 - restricted, 2 - full")
 
 flags.DEFINE_string(
     "tpu_name", None,
@@ -146,6 +139,15 @@ flags.DEFINE_integer(
 flags.DEFINE_bool("use_fp16", False, "Whether to use FP16 via AMP.")
 
 flags.DEFINE_bool("manual_fp16", False, "Whether to use NVIDIA manual FP16.")
+
+flags.DEFINE_bool("use_horovod", False, "Whether to use Horovod.")
+
+flags.DEFINE_string("optimizer_type", "adam", "Optimizer used for training - adam (default), lamb, nadam and nlamb")
+
+FLAGS = flags.FLAGS
+
+import cond_xla
+cond_xla.use_xla = FLAGS.use_xla
 
 # (copied from NVBERT)
 # report samples/sec, total loss and learning rate during training
@@ -226,11 +228,9 @@ class _LogSessionRunHook(tf.estimator.SessionRunHook):
             self.all_count = 0
             sys.stdout.flush()
 
-
-
 def model_fn_builder(bert_config, init_checkpoint, learning_rate,
                      num_train_steps, num_warmup_steps, use_tpu,
-                     use_one_hot_embeddings):
+                     use_one_hot_embeddings, use_hvd):
   """Returns `model_fn` closure for TPUEstimator."""
 
   def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
@@ -256,7 +256,8 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
         input_ids=input_ids,
         input_mask=input_mask,
         token_type_ids=segment_ids,
-        use_one_hot_embeddings=use_one_hot_embeddings)
+        use_one_hot_embeddings=use_one_hot_embeddings,
+        compute_type=tf.float16 if FLAGS.manual_fp16 else tf.float32)
 
     (masked_lm_loss,
      masked_lm_example_loss, masked_lm_log_probs) = get_masked_lm_output(
@@ -269,7 +270,6 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
 
     masked_lm_loss = tf.identity(masked_lm_loss, name="mlm_loss")
     next_sentence_loss = tf.identity(next_sentence_loss, name="nsp_loss")
-
     total_loss = masked_lm_loss + next_sentence_loss
     total_loss = tf.identity(total_loss, name='total_loss')
     tvars = tf.compat.v1.trainable_variables()
@@ -290,17 +290,22 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
         tf.compat.v1.train.init_from_checkpoint(init_checkpoint, assignment_map)
 
     tf.compat.v1.logging.info("**** Trainable Variables ****")
+    row = 0
     for var in tvars:
       init_string = ""
       if var.name in initialized_variable_names:
         init_string = ", *INIT_FROM_CKPT*"
-      tf.compat.v1.logging.info("  name = %s, shape = %s%s", var.name, var.shape,
+      if row<10 or row>len(tvars)-10:
+        tf.compat.v1.logging.info("  name = %s, shape = %s%s", var.name, var.shape,
                       init_string)
+      if row==10:
+        tf.compat.v1.logging.info("...")
+      row+=1
 
     output_spec = None
     if mode == tf.estimator.ModeKeys.TRAIN:
       train_op = optimization.create_optimizer(
-          total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu, use_hvd)
+          total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu, use_hvd, FLAGS.optimizer_type, use_fp16=FLAGS.use_fp16, manual_fp16=FLAGS.manual_fp16)
 
       output_spec = tf.compat.v1.estimator.tpu.TPUEstimatorSpec(
           mode=mode,
@@ -494,9 +499,6 @@ def input_fn_builder(input_files,
       d = d.shuffle(buffer_size=100)
     else:
       d = tf.data.TFRecordDataset(input_files)
-      # Since we evaluate for a fixed number of steps we don't want to encounter
-      # out-of-range exceptions.
-      #d = d.repeat()
 
     # We must `drop_remainder` on training because the TPU requires fixed
     # size dimensions. For eval, we assume we are evaluating on the CPU or GPU
@@ -527,7 +529,6 @@ def _decode_record(record, name_to_features):
 
   return example
 
-
 def main(_):
   use_hvd = False
   if FLAGS.use_horovod and hvd != None:
@@ -547,7 +548,6 @@ def main(_):
     raise ValueError("At least one of `do_train` or `do_eval` must be True.")
 
   bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file)
-
   tf.io.gfile.makedirs(FLAGS.output_dir)
 
   input_files = []
@@ -555,8 +555,11 @@ def main(_):
     input_files.extend(tf.io.gfile.glob(input_pattern))
 
   tf.compat.v1.logging.info("*** Input Files ***")
+  row=0
   for input_file in input_files:
-    tf.compat.v1.logging.info("  %s" % input_file)
+    if row<10 or row>len(input_files)-10:
+      tf.compat.v1.logging.info("  %s" % input_file)
+    row+=1
 
   tpu_cluster_resolver = None
   if FLAGS.use_tpu and FLAGS.tpu_name:
@@ -564,13 +567,14 @@ def main(_):
         FLAGS.tpu_name, zone=FLAGS.tpu_zone, project=FLAGS.gcp_project)
 
   is_per_host = tf.compat.v1.estimator.tpu.InputPipelineConfig.PER_HOST_V2
-  session_config =  tf.compat.v1.ConfigProto()
-  if FLAGS.use_xla:
-      session_config.graph_options.optimizer_options.global_jit_level = tf.compat.v1.OptimizerOptions.ON_1
-      session_config.graph_options.rewrite_options.memory_optimization = rewriter_config_pb2.RewriterConfig.NO_MEM_OPT
+
+  config = tf.compat.v1.ConfigProto()
+  if FLAGS.use_xla==2:
+    config.graph_options.optimizer_options.global_jit_level = tf.compat.v1.OptimizerOptions.ON_1
+    config.graph_options.rewrite_options.memory_optimization = rewriter_config_pb2.RewriterConfig.NO_MEM_OPT
   if use_hvd:
-      # [HVD] Pin each worker to a GPU (make sure one worker uses only one GPU).
-      session_config.gpu_options.visible_device_list = str(hvd.local_rank())
+    # [HVD] Pin each worker to a GPU (make sure one worker uses only one GPU).
+    config.gpu_options.visible_device_list = str(hvd.local_rank())
 
   run_config = tf.compat.v1.estimator.tpu.RunConfig(
       cluster=tpu_cluster_resolver,
@@ -581,8 +585,8 @@ def main(_):
           iterations_per_loop=FLAGS.iterations_per_loop,
           num_shards=FLAGS.num_tpu_cores,
           per_host_input_for_training=is_per_host),
-          log_step_count_steps=1000000000,
-          session_config=session_config)
+      log_step_count_steps=10000000,
+      session_config=config)
 
   model_fn = model_fn_builder(
       bert_config=bert_config,
@@ -591,7 +595,8 @@ def main(_):
       num_train_steps=FLAGS.num_train_steps,
       num_warmup_steps=FLAGS.num_warmup_steps,
       use_tpu=FLAGS.use_tpu,
-      use_one_hot_embeddings=FLAGS.use_tpu)
+      use_one_hot_embeddings=FLAGS.use_tpu,
+      use_hvd=use_hvd)
 
   # If TPU is not available, this will fall back to normal Estimator on CPU
   # or GPU.
@@ -613,7 +618,6 @@ def main(_):
 
     hooks = []
     if (not FLAGS.use_horovod or hvd.rank() == 0):
-      #global_batch_size = FLAGS.train_batch_size * FLAGS.num_accumulation_steps if not FLAGS.horovod else FLAGS.train_batch_size * FLAGS.num_accumulation_steps * hvd.size()
       global_batch_size = FLAGS.train_batch_size if not FLAGS.use_horovod else FLAGS.train_batch_size * hvd.size()
       hooks.append(_LogSessionRunHook(global_batch_size, 1, FLAGS.display_loss_steps))
     if use_hvd:

@@ -43,6 +43,7 @@ for CONFIG in 10,128; do
     --max_predictions_per_seq=20 \
     --num_train_steps=1000 \
     --num_warmup_steps=100000 \
-    --learning_rate=1e-4
+    --learning_rate=1e-4 \
+    --use_xla=1
 
 done

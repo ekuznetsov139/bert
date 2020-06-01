@@ -14,7 +14,7 @@ export TF_NUM_INTRAOP_THREADS=4
 export TF_NUM_INTEROP_THREADS=4
 
 #rm -rf $TRAIN_DIR
-mkdir -p $TRAIN_DIR
+#mkdir -p $TRAIN_DIR
 mkdir -p $DATA_DIR
 
 # prep train dir
@@ -52,8 +52,10 @@ for CONFIG in 10,128; do
     --num_warmup_steps=100000 \
     --learning_rate=1e-4 \
     --use_horovod=True \
+    --use_fp16=False \
+    --use_xla=1 \
     |& tee -a train128.txt
 
-#  parallel -j 8 < scripts/eval_commands
-#  python3 scripts/parse_eval.py
+  parallel -j 8 < scripts/eval_commands
+  python3 scripts/parse_eval.py
 done
