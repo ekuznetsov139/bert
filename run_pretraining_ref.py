@@ -21,11 +21,13 @@ from __future__ import print_function
 import os
 import sys
 import time
+import modeling
+import optimization
 import tensorflow as tf
 
 from tensorflow.core.protobuf import rewriter_config_pb2
 
-tf.compat.v1.disable_eager_execution()
+tf.compat.v1.disable_resource_variables()
 
 # Add Horovod to run_pretraining
 try:
@@ -35,19 +37,7 @@ except:
 
 flags = tf.compat.v1.flags
 
-
-import multiprocessing.spawn
-_old_preparation_data = multiprocessing.spawn.get_preparation_data
-
-def _patched_preparation_data(name):
-    try:
-        return _old_preparation_data(name)
-    except AttributeError:
-        main_module = sys.modules['__main__']
-        # Any string for __spec__ does the job
-        main_module.__spec__ = ''
-        return _old_preparation_data(name)
-multiprocessing.spawn.get_preparation_data = _patched_preparation_data
+FLAGS = flags.FLAGS
 
 ## Required parameters
 flags.DEFINE_string(
@@ -96,7 +86,7 @@ flags.DEFINE_integer("num_train_steps", 100000, "Number of training steps.")
 
 flags.DEFINE_integer("num_warmup_steps", 10000, "Number of warmup steps.")
 
-flags.DEFINE_integer("save_checkpoints_steps", 25000,
+flags.DEFINE_integer("save_checkpoints_steps", 1000,
                      "How often to save the model checkpoint.")
 
 flags.DEFINE_integer("iterations_per_loop", 1000,
@@ -142,16 +132,6 @@ flags.DEFINE_bool("use_horovod", False, "Whether to use Horovod.")
 
 flags.DEFINE_string("optimizer_type", "adam", "Optimizer used for training - adam (default), lamb, nadam and nlamb")
 
-FLAGS = flags.FLAGS
-
-import cond_xla
-# must be done _before_ we import modeling or optimization
-# (otherwise use_xla won't stick)
-cond_xla.use_xla = FLAGS.use_xla
-
-import modeling
-import optimization
-
 # (copied from NVBERT)
 # report samples/sec, total loss and learning rate during training
 class _LogSessionRunHook(tf.estimator.SessionRunHook):
@@ -169,7 +149,7 @@ class _LogSessionRunHook(tf.estimator.SessionRunHook):
   def before_run(self, run_context):
     self.t0 = time.time()
     if self.num_accumulation_steps <= 1:
-        if False: #FLAGS.manual_fp16 or FLAGS.use_fp16:
+        if FLAGS.manual_fp16 or FLAGS.use_fp16:
             return tf.estimator.SessionRunArgs(
                 fetches=['step_update:0', 'total_loss:0',
                          'learning_rate:0', 'nsp_loss:0',
@@ -193,7 +173,7 @@ class _LogSessionRunHook(tf.estimator.SessionRunHook):
   def after_run(self, run_context, run_values):
     self.elapsed_secs += time.time() - self.t0
     if self.num_accumulation_steps <=1:
-        if False: #FLAGS.manual_fp16 or FLAGS.use_fp16:
+        if FLAGS.manual_fp16 or FLAGS.use_fp16:
             global_step, total_loss, lr, nsp_loss, mlm_loss, loss_scaler = run_values.results
         else:
             global_step, total_loss, lr, nsp_loss, mlm_loss = run_values. \
@@ -215,11 +195,11 @@ class _LogSessionRunHook(tf.estimator.SessionRunHook):
             sent_per_sec = self.global_batch_size / dt
             avg_loss_step = self.avg_loss / self.all_count
             if self.hvd_rank >= 0:
-              if False: #FLAGS.manual_fp16 or FLAGS.use_fp16:
+              if FLAGS.manual_fp16 or FLAGS.use_fp16:
                 print('Rank = %2d :: Step = %6i Throughput = %11.1f MLM Loss = %10.4e NSP Loss = %10.4e Loss = %6.3f Average Loss = %6.3f LR = %6.4e Loss scale = %6.4e' %
                       (self.hvd_rank, print_step, sent_per_sec, mlm_loss, nsp_loss, total_loss, avg_loss_step, lr, loss_scaler))
             else:
-              if False: #FLAGS.manual_fp16 or FLAGS.use_fp16:
+              if FLAGS.manual_fp16 or FLAGS.use_fp16:
                 print('Step = %6i Throughput = %11.1f MLM Loss = %10.4e NSP Loss = %10.4e Loss = %6.3f Average Loss = %6.3f LR = %6.4e Loss scale = %6.4e' %
                       (print_step, sent_per_sec, mlm_loss, nsp_loss, total_loss, avg_loss_step, lr, loss_scaler))
               else:
@@ -259,8 +239,7 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
         input_ids=input_ids,
         input_mask=input_mask,
         token_type_ids=segment_ids,
-        use_one_hot_embeddings=use_one_hot_embeddings,
-        compute_type=tf.float16 if FLAGS.manual_fp16 else tf.float32)
+        use_one_hot_embeddings=use_one_hot_embeddings)
 
     (masked_lm_loss,
      masked_lm_example_loss, masked_lm_log_probs) = get_masked_lm_output(
@@ -293,22 +272,17 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
         tf.compat.v1.train.init_from_checkpoint(init_checkpoint, assignment_map)
 
     tf.compat.v1.logging.info("**** Trainable Variables ****")
-    row = 0
     for var in tvars:
       init_string = ""
       if var.name in initialized_variable_names:
         init_string = ", *INIT_FROM_CKPT*"
-      if row<10 or row>len(tvars)-10:
-        tf.compat.v1.logging.info("  name = %s, shape = %s%s", var.name, var.shape,
+      tf.compat.v1.logging.info("  name = %s, shape = %s%s", var.name, var.shape,
                       init_string)
-      if row==10:
-        tf.compat.v1.logging.info("...")
-      row+=1
 
     output_spec = None
     if mode == tf.estimator.ModeKeys.TRAIN:
       train_op = optimization.create_optimizer(
-          total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu, use_hvd, FLAGS.optimizer_type, use_fp16=FLAGS.use_fp16, manual_fp16=FLAGS.manual_fp16)
+          total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu, use_hvd, FLAGS.optimizer_type)
 
       output_spec = tf.compat.v1.estimator.tpu.TPUEstimatorSpec(
           mode=mode,
@@ -532,6 +506,7 @@ def _decode_record(record, name_to_features):
 
   return example
 
+
 def main(_):
   use_hvd = False
   if FLAGS.use_horovod and hvd != None:
@@ -541,7 +516,6 @@ def main(_):
   if use_hvd:
     # [HVD] Initialize the library: basic bookkeeping, sets up communication between GPUs, allocates buffers etc.
     hvd.init()
-    print("Horovod size ", hvd.size())
     # [HVD] Use different output directories for different GPU's. 
     FLAGS.output_dir = FLAGS.output_dir if hvd.rank() == 0 else os.path.join(FLAGS.output_dir, str(hvd.rank()))
     # [HVD] The training_steps for each GPU is the total steps divided by the number of GPU's.
@@ -552,6 +526,7 @@ def main(_):
     raise ValueError("At least one of `do_train` or `do_eval` must be True.")
 
   bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file)
+
   tf.io.gfile.makedirs(FLAGS.output_dir)
 
   input_files = []
@@ -559,11 +534,8 @@ def main(_):
     input_files.extend(tf.io.gfile.glob(input_pattern))
 
   tf.compat.v1.logging.info("*** Input Files ***")
-  row=0
   for input_file in input_files:
-    if row<10 or row>len(input_files)-10:
-      tf.compat.v1.logging.info("  %s" % input_file)
-    row+=1
+    tf.compat.v1.logging.info("  %s" % input_file)
 
   tpu_cluster_resolver = None
   if FLAGS.use_tpu and FLAGS.tpu_name:

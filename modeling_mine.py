@@ -26,9 +26,7 @@ import re
 import numpy as np
 import six
 import tensorflow as tf
-
-from gpu_environment import get_custom_getter
-from cond_xla import conditional_xla, use_xla
+import os
 
 class BertConfig(object):
   """Configuration for `BertModel`."""
@@ -137,8 +135,7 @@ class BertModel(object):
                input_mask=None,
                token_type_ids=None,
                use_one_hot_embeddings=False,
-               scope=None,
-               compute_type=tf.float32):
+               scope=None):
     """Constructor for BertModel.
 
     Args:
@@ -171,7 +168,7 @@ class BertModel(object):
     if token_type_ids is None:
       token_type_ids = tf.zeros(shape=[batch_size, seq_length], dtype=tf.int32)
 
-    with tf.compat.v1.variable_scope(scope, default_name="bert", custom_getter=get_custom_getter(compute_type)):
+    with tf.compat.v1.variable_scope(scope, default_name="bert"):
       with tf.compat.v1.variable_scope("embeddings"):
         # Perform embedding lookup on the word ids.
         (self.embedding_output, self.embedding_table) = embedding_lookup(
@@ -206,8 +203,7 @@ class BertModel(object):
         # Run the stacked transformer.
         # `sequence_output` shape = [batch_size, seq_length, hidden_size].
         self.all_encoder_layers = transformer_model(
-            input_tensor=tf.saturate_cast(self.embedding_output, compute_type) \
-              if self.embedding_output.dtype!=compute_type else self.embedding_output,
+            input_tensor=self.embedding_output,
             attention_mask=attention_mask,
             hidden_size=config.hidden_size,
             num_hidden_layers=config.num_hidden_layers,
@@ -264,7 +260,7 @@ class BertModel(object):
   def get_embedding_table(self):
     return self.embedding_table
 
-@conditional_xla()
+#@tf.function(experimental_compile=True,experimental_relax_shapes=True)
 def gelu(x):
   """Gaussian Error Linear Unit.
 
@@ -276,11 +272,8 @@ def gelu(x):
   Returns:
     `x` with the GELU activation applied.
   """
-  if False: #not use_xla:
-    try:
-      return tf.nn.gelu(x)
-    except:
-      pass
+#  if os.environ.get('TF_ROCM_GELU')=='1':
+#    return tf.nn.gelu(x)
   cdf = 0.5 * (1.0 + tf.tanh(
       (np.sqrt(2 / np.pi) * (x + 0.044715 * tf.pow(x, 3)))))
   return x * cdf
@@ -364,9 +357,8 @@ def dropout(input_tensor, dropout_prob):
   if dropout_prob is None or dropout_prob == 0.0:
     return input_tensor
 
-  output = tf.nn.dropout(input_tensor, 1 - (1.0 - dropout_prob))
+  output = tf.nn.dropout(input_tensor, rate = dropout_prob)
   return output
-
 
 def layer_norm(input_tensor, name=None):
   """Run layer normalization on the last dimension of the tensor."""
@@ -375,7 +367,7 @@ def layer_norm(input_tensor, name=None):
          initializer=tf.ones_initializer())
   offset = tf.compat.v1.get_variable(name="offset", shape=param_shape,
          initializer=tf.zeros_initializer())
-  @conditional_xla()
+  @tf.function(experimental_compile=True,experimental_relax_shapes=True)
   def batch_norm(t, s, o):
     mean, variance = tf.nn.moments(t, axes=[-1], keepdims=True)
     return tf.nn.batch_normalization(
@@ -386,6 +378,8 @@ def layer_norm(input_tensor, name=None):
           scale=s,
           variance_epsilon=1e-12)
   return batch_norm(input_tensor, scale, offset)
+  #return tf.keras.layers.LayerNormalization(axis=-1, epsilon=1e-12)(inputs=input_tensor)
+
 
 def layer_norm_and_dropout(input_tensor, dropout_prob, name=None):
   """Runs layer normalization followed by dropout."""
@@ -744,8 +738,6 @@ def attention_layer(from_tensor,
   # This is actually dropping out entire tokens to attend to, which might
   # seem a bit unusual, but is taken from the original Transformer paper.
   attention_probs = dropout(attention_probs, attention_probs_dropout_prob)
-#  if attention_mask is not None:
-#    attention_probs *= tf.cast(attention_mask, tf.float32)
 
   # `value_layer` = [B, T, N, H]
   value_layer = tf.reshape(

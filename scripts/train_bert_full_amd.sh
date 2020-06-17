@@ -6,8 +6,9 @@ DATA_DIR=/data/wikipedia
 TRAIN_DIR=./bert_full_train
 MODEL_CONFIG_DIR=configs/bert_large
 
-rm -rf $TRAIN_DIR
-mkdir -p $TRAIN_DIR
+#rm -rf $TRAIN_DIR
+#mkdir -p $TRAIN_DIR
+rm -rf $TRAIN_DIR/*
 mkdir -p $DATA_DIR
 
 # prep train dir
@@ -41,9 +42,10 @@ for CONFIG in 10,128; do
     --train_batch_size=$BATCH \
     --max_seq_length=$SEQ \
     --max_predictions_per_seq=20 \
-    --num_train_steps=1000 \
-    --num_warmup_steps=100000 \
+    --num_train_steps=1000000 \
+    --num_warmup_steps=1000 \
     --learning_rate=1e-4 \
-    --use_xla=1
+    --use_fp16=False \
+    --use_xla=0
 
 done
