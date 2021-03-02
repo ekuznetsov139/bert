@@ -30,6 +30,70 @@ import tensorflow as tf
 from gpu_environment import get_custom_getter
 from cond_xla import conditional_xla, use_xla
 
+import horovod.tensorflow as hvd
+
+do_q8=True
+q8sim = {
+   'fwd': [4,3,False],
+   'bwd': [5,2,False]
+}
+
+def wrap_matmul(x, y, transpose_a=False, transpose_b=False, scale_x=None, scale_y=None):
+  if not do_q8:
+    return tf.matmul(x, y, transpose_a=transpose_a, transpose_b=transpose_b)
+  inv_scale=1.0
+  if scale_x!=None:
+    x = x*scale_x
+    inv_scale = 1./scale_x
+  if scale_y!=None:
+    y = y*scale_y
+    inv_scale *= 1./scale_y
+  fwd = q8sim['fwd']
+  bwd = q8sim['bwd']
+  x = tf.raw_ops.Quant8Fwd(features=x,exp=fwd[0],mant=fwd[1],stoch=fwd[2],dynamic=False)
+  y = tf.raw_ops.Quant8Fwd(features=y,exp=fwd[0],mant=fwd[1],stoch=fwd[2],dynamic=False)
+  results = tf.matmul(x, y, transpose_a=transpose_a, transpose_b=transpose_b)
+  if scale_x!=None or scale_y!=None:
+    results = results*inv_scale
+  results = tf.raw_ops.Quant8Bwd(features=results,exp=bwd[0],mant=bwd[1],stoch=bwd[2],dynamic=False)
+  return results
+
+def ref_dense(x, size, activation=None, kernel_initializer=None, name=None):
+  sh = tf.shape(x)
+  weight_shape = [x.shape[-1], size]
+  out_shape    = tf.concat([sh[:-1], tf.convert_to_tensor([size],dtype=tf.int32)], axis=0)
+  if len(x.shape)==3:
+    v=tf.concat([sh[0:1]*sh[1:2], sh[-1:] ],axis=0)
+    flat_shape=tf.convert_to_tensor(v,dtype=tf.int32)
+    x=tf.reshape(x,flat_shape)
+  weights = tf.compat.v1.get_variable((name or "") + "_scale", shape=weight_shape,
+         initializer=kernel_initializer)
+  results = tf.matmul(x, tf.cast(weights, x.dtype))
+  if activation!=None:
+    results = activation(results)
+  if out_shape!=None:
+    results = tf.reshape(results, out_shape)
+  return results
+
+def dense(x, size, activation=None, kernel_initializer=None, name=None):
+  sh = tf.shape(x)
+  weight_shape = [x.shape[-1], size]
+  out_shape    = tf.concat([sh[:-1], tf.convert_to_tensor([size],dtype=tf.int32)], axis=0)
+  if len(x.shape)==3:
+    v=tf.concat([sh[0:1]*sh[1:2], sh[-1:] ],axis=0)
+    flat_shape=tf.convert_to_tensor(v,dtype=tf.int32)
+    x=tf.reshape(x,flat_shape)
+  weights = tf.compat.v1.get_variable((name or "") + "_scale", shape=weight_shape,
+           initializer=kernel_initializer)
+  #weights = weights*64.
+  #with tf.control_dependencies([tf.print(x, tf.reduce_max(tf.abs(wq)))]):
+  results = wrap_matmul(x, weights)
+  if activation!=None:
+    results = activation(results)
+  if out_shape!=None:
+    results = tf.reshape(results, out_shape)
+  return results
+
 class BertConfig(object):
   """Configuration for `BertModel`."""
 
@@ -229,10 +293,10 @@ class BertModel(object):
         # We "pool" the model by simply taking the hidden state corresponding
         # to the first token. We assume that this has been pre-trained
         first_token_tensor = tf.squeeze(self.sequence_output[:, 0:1, :], axis=1)
-        self.pooled_output = tf.compat.v1.layers.dense(
+        self.pooled_output = dense(
             first_token_tensor,
             config.hidden_size,
-            activation=tf.tanh,
+            activation=gelu,
             kernel_initializer=create_initializer(config.initializer_range))
 
   def get_pooled_output(self):
@@ -264,7 +328,7 @@ class BertModel(object):
   def get_embedding_table(self):
     return self.embedding_table
 
-@conditional_xla()
+#@conditional_xla()
 def gelu(x):
   """Gaussian Error Linear Unit.
 
@@ -276,13 +340,13 @@ def gelu(x):
   Returns:
     `x` with the GELU activation applied.
   """
-  if False: #not use_xla:
+  if True: #not use_xla:
     try:
-      return tf.nn.gelu(x)
+      return tf.nn.gelu(x, approximate=True)
     except:
       pass
   cdf = 0.5 * (1.0 + tf.tanh(
-      (np.sqrt(2 / np.pi) * (x + 0.044715 * tf.pow(x, 3)))))
+      (np.sqrt(2 / np.pi) * x*(1.0 + 0.044715*x*x))))
   return x * cdf
 
 
@@ -369,7 +433,8 @@ def dropout(input_tensor, dropout_prob):
 
 
 def layer_norm(input_tensor, name=None):
-  """Run layer normalization on the last dimension of the tensor."""
+  return tf.keras.layers.LayerNormalization(axis=-1, epsilon=1e-4)(inputs=input_tensor)
+  """
   param_shape = input_tensor.shape[-1:]
   scale = tf.compat.v1.get_variable(name="scale", shape=param_shape,
          initializer=tf.ones_initializer())
@@ -386,11 +451,20 @@ def layer_norm(input_tensor, name=None):
           scale=s,
           variance_epsilon=1e-12)
   return batch_norm(input_tensor, scale, offset)
+  """
 
 def layer_norm_and_dropout(input_tensor, dropout_prob, name=None):
   """Runs layer normalization followed by dropout."""
+  fwd = q8sim['fwd']
+  bwd = q8sim['bwd']
+  input_tensor = tf.raw_ops.Quant8Fwd(features=input_tensor,exp=fwd[0],mant=fwd[1],stoch=fwd[2],dynamic=False)
   output_tensor = layer_norm(input_tensor, name)
+  output_tensor = tf.raw_ops.Quant8Bwd(features=output_tensor,exp=bwd[0],mant=bwd[1],stoch=bwd[2],dynamic=False)
+
+  output_tensor = tf.raw_ops.Quant8Fwd(features=output_tensor,exp=fwd[0],mant=fwd[1],stoch=fwd[2],dynamic=False)
   output_tensor = dropout(output_tensor, dropout_prob)
+  #output_tensor = tf.raw_ops.Quant8Fwd(features=output_tensor,exp=fwd[0],mant=fwd[1],stoch=fwd[2],dynamic=False)
+  output_tensor = tf.raw_ops.Quant8Bwd(features=output_tensor,exp=bwd[0],mant=bwd[1],stoch=bwd[2],dynamic=False)
   return output_tensor
 
 
@@ -436,7 +510,7 @@ def embedding_lookup(input_ids,
   flat_input_ids = tf.reshape(input_ids, [-1])
   if use_one_hot_embeddings:
     one_hot_input_ids = tf.one_hot(flat_input_ids, depth=vocab_size)
-    output = tf.matmul(one_hot_input_ids, embedding_table)
+    output = wrap_matmul(one_hot_input_ids, embedding_table)
   else:
     output = tf.gather(embedding_table, flat_input_ids)
 
@@ -503,7 +577,7 @@ def embedding_postprocessor(input_tensor,
     # faster for a small vocabulary.
     flat_token_type_ids = tf.reshape(token_type_ids, [-1])
     one_hot_ids = tf.one_hot(flat_token_type_ids, depth=token_type_vocab_size)
-    token_type_embeddings = tf.matmul(one_hot_ids, token_type_table)
+    token_type_embeddings = wrap_matmul(one_hot_ids, token_type_table)
     token_type_embeddings = tf.reshape(token_type_embeddings,
                                        [batch_size, seq_length, width])
     output += token_type_embeddings
@@ -685,7 +759,7 @@ def attention_layer(from_tensor,
   to_tensor_2d = reshape_to_matrix(to_tensor)
 
   # `query_layer` = [B*F, N*H]
-  query_layer = tf.compat.v1.layers.dense(
+  query_layer = dense(
       from_tensor_2d,
       num_attention_heads * size_per_head,
       activation=query_act,
@@ -693,7 +767,7 @@ def attention_layer(from_tensor,
       kernel_initializer=create_initializer(initializer_range))
 
   # `key_layer` = [B*T, N*H]
-  key_layer = tf.compat.v1.layers.dense(
+  key_layer = dense(
       to_tensor_2d,
       num_attention_heads * size_per_head,
       activation=key_act,
@@ -701,7 +775,7 @@ def attention_layer(from_tensor,
       kernel_initializer=create_initializer(initializer_range))
 
   # `value_layer` = [B*T, N*H]
-  value_layer = tf.compat.v1.layers.dense(
+  value_layer = dense(
       to_tensor_2d,
       num_attention_heads * size_per_head,
       activation=value_act,
@@ -720,7 +794,7 @@ def attention_layer(from_tensor,
   # Take the dot product between "query" and "key" to get the raw
   # attention scores.
   # `attention_scores` = [B, N, F, T]
-  attention_scores = tf.matmul(query_layer, key_layer, transpose_b=True)
+  attention_scores = wrap_matmul(query_layer, key_layer, transpose_b=True)
   attention_scores = tf.multiply(attention_scores,
                                  1.0 / math.sqrt(float(size_per_head)))
 
@@ -756,7 +830,7 @@ def attention_layer(from_tensor,
   value_layer = tf.transpose(a=value_layer, perm=[0, 2, 1, 3])
 
   # `context_layer` = [B, N, F, H]
-  context_layer = tf.matmul(attention_probs, value_layer)
+  context_layer = wrap_matmul(attention_probs, value_layer)
 
   # `context_layer` = [B, F, N, H]
   context_layer = tf.transpose(a=context_layer, perm=[0, 2, 1, 3])
@@ -879,7 +953,7 @@ def transformer_model(input_tensor,
         # Run a linear projection of `hidden_size` then add a residual
         # with `layer_input`.
         with tf.compat.v1.variable_scope("output"):
-          attention_output = tf.compat.v1.layers.dense(
+          attention_output = dense(
               attention_output,
               hidden_size,
               kernel_initializer=create_initializer(initializer_range))
@@ -888,7 +962,7 @@ def transformer_model(input_tensor,
 
       # The activation is only applied to the "intermediate" hidden layer.
       with tf.compat.v1.variable_scope("intermediate"):
-        intermediate_output = tf.compat.v1.layers.dense(
+        intermediate_output = dense(
             attention_output,
             intermediate_size,
             activation=intermediate_act_fn,
@@ -896,7 +970,7 @@ def transformer_model(input_tensor,
 
       # Down-project back to `hidden_size` then add the residual.
       with tf.compat.v1.variable_scope("output"):
-        layer_output = tf.compat.v1.layers.dense(
+        layer_output = dense(
             intermediate_output,
             hidden_size,
             kernel_initializer=create_initializer(initializer_range))

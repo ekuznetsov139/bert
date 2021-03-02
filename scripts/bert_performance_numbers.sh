@@ -1,1 +1,0 @@
-python3 scripts/bert_performance_numbers.py

@@ -1,1 +1,0 @@
-python3 scripts/get_avg_bert_metrics.py $1

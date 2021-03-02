@@ -17,7 +17,7 @@ DATA_SOURCE_FILE_PATH=data/wiki_00
 DATA_SOURCE_NAME=$(basename "$DATA_SOURCE_FILE_PATH")
 
 # iterate through configs (Batch, Sequence Length)
-for CONFIG in 4,512; do
+for CONFIG in 20,128; do
 
   IFS=","
   set -- $CONFIG
@@ -45,17 +45,20 @@ for CONFIG in 4,512; do
 
   # run pretraining
   python3 $CODE_DIR/run_pretraining.py \
-    --input_file=$DATA_TFRECORD \
+   --input_file=$DATA_TFRECORD \
     --output_dir=$CUR_TRAIN_DIR \
     --do_train=True \
-    --do_eval=True \
+    --do_eval=False \
     --bert_config_file=$TRAIN_DIR/bert_config.json \
     --train_batch_size=$BATCH \
     --max_seq_length=$SEQ \
     --max_predictions_per_seq=20 \
-    --num_train_steps=1500 \
-    --num_warmup_steps=150 \
-    --learning_rate=2e-5 \
+    --num_train_steps=100 \
+    --num_warmup_steps=50 \
+    --learning_rate=1e-6 \
+    --use_horovod=False \
+    --use_fp16=True \
+    --use_xla=1 \
     2>&1 | tee $CUR_TRAIN_DIR/${DATA_SOURCE_NAME}_ba${BATCH}_seq${SEQ}.txt
 
 done
